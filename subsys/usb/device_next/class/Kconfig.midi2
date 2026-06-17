@@ -10,6 +10,26 @@ config USBD_MIDI2_CLASS
 
 if USBD_MIDI2_CLASS
 
+config USBD_MIDI2_ALTSETTING_MIDI1
+	bool "Expose the USB-MIDI 1.0 alternate setting"
+	default y
+	help
+	  Build the legacy USB-MIDI 1.0 alternate setting and its descriptors and
+	  code paths. Disable this option to drop USB-MIDI 1.0 support entirely at
+	  compile time, saving flash and RAM. At least one of
+	  USBD_MIDI2_ALTSETTING_MIDI1 and USBD_MIDI2_ALTSETTING_MIDI2 must be
+	  enabled.
+
+config USBD_MIDI2_ALTSETTING_MIDI2
+	bool "Expose the USB-MIDI 2.0 alternate setting"
+	default y
+	help
+	  Build the USB-MIDI 2.0 alternate setting and its descriptors and code
+	  paths. Disable this option to drop USB-MIDI 2.0 support entirely at
+	  compile time, saving flash and RAM. At least one of
+	  USBD_MIDI2_ALTSETTING_MIDI1 and USBD_MIDI2_ALTSETTING_MIDI2 must be
+	  enabled.
+
 config USBD_MIDI2_TX_QUEUE_SIZE
 	int "MIDI 2.0 class transmit queue size"
 	default 64

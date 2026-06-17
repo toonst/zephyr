@@ -23,6 +23,27 @@ LOG_MODULE_REGISTER(usbd_midi2, CONFIG_USBD_MIDI2_LOG_LEVEL);
 #define MIDI1_ALTERNATE 0x00
 #define MIDI2_ALTERNATE 0x01
 
+BUILD_ASSERT(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) ||
+		     IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2),
+	     "At least one USB-MIDI alternate setting must be enabled");
+
+/* Index of the descriptor pointer array to report to the host for a given
+ * combination of enabled alternate settings. Entries only exist for the
+ * combinations that are reachable given the compile-time configuration.
+ */
+enum usbd_midi_mode_index {
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+	USBD_MIDI_MODE_INDEX_MIDI1_ONLY,
+#endif
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	USBD_MIDI_MODE_INDEX_MIDI2_ONLY,
+#endif
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	USBD_MIDI_MODE_INDEX_BOTH,
+#endif
+	USBD_MIDI_MODE_INDEX_COUNT,
+};
+
 UDC_BUF_POOL_DEFINE(usbd_midi_buf_pool, DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) * 2, 512U,
 		    sizeof(struct udc_buf_info), NULL);
 
@@ -217,6 +238,7 @@ struct usbd_midi_descriptors {
 	 * jack) are zero-initialised and are not referenced from the descriptor
 	 * pointer arrays.
 	 */
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 	struct usb_if_descriptor if1_0_std;
 	struct usb_midi_header_descriptor if1_0_ms_header;
 	struct usb_midi_in_jack_descriptor if1_0_emb_in_jacks[USBD_MIDI_MAX_CABLES];
@@ -229,7 +251,9 @@ struct usbd_midi_descriptors {
 	struct usb_ep_descriptor if1_0_in_ep_fs;
 	struct usb_ep_descriptor if1_0_in_ep_hs;
 	struct usb_midi1_cs_endpoint_descriptor if1_0_cs_in_ep;
+#endif
 
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
 	/* MidiStreaming 2.0 on altsetting 1 */
 	struct usb_if_descriptor if1_1_std;
 	struct usb_midi_header_descriptor if1_1_ms_header;
@@ -239,6 +263,7 @@ struct usbd_midi_descriptors {
 	struct usb_ep_descriptor if1_1_in_ep_fs;
 	struct usb_ep_descriptor if1_1_in_ep_hs;
 	struct usb_midi_cs_endpoint_descriptor if1_1_cs_in_ep;
+#endif
 
 	/* MidiStreaming 2.0 Class-Specific Group Terminal Block Descriptors
 	 * Retrievable by a Separate Get Request
@@ -250,8 +275,11 @@ struct usbd_midi_descriptors {
 /* Device driver configuration */
 struct usbd_midi_config {
 	struct usbd_midi_descriptors *desc;
-	const struct usb_desc_header **fs_descs;
-	const struct usb_desc_header **hs_descs;
+	/* Descriptor pointer arrays, one per reachable enabled-alternate
+	 * combination. Indexed by enum usbd_midi_mode_index.
+	 */
+	const struct usb_desc_header **fs_descs[USBD_MIDI_MODE_INDEX_COUNT];
+	const struct usb_desc_header **hs_descs[USBD_MIDI_MODE_INDEX_COUNT];
 	/* USB-MIDI 1.0 cable-number to MIDI 2.0 group lookup tables. The
 	 * entries are listed in the same order as the corresponding
 	 * baAssocJackID list in the matching class-specific endpoint
@@ -275,15 +303,165 @@ struct usbd_midi_data {
 	 * usbd_midi_ops.status_changed_cb, also returned by usbd_midi_get_status.
 	 */
 	enum usbd_midi_status status;
+	/* Runtime selection of the alternates exposed to the host. Only
+	 * alternates that are also built in can be enabled.
+	 */
+	bool midi1_enabled;
+	bool midi2_enabled;
 	struct usbd_midi_ops ops;
 };
 
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
 static void usbd_midi2_recv(const struct device *dev, struct net_buf *const buf);
+#endif
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 static void usbd_midi1_recv(const struct device *dev, struct net_buf *const buf);
+#endif
+
+/**
+ * @brief Resolve the alternate setting the device defaults to after reset.
+ *
+ * @param data  Driver instance data holding the runtime enable flags.
+ *
+ * @return MIDI1_ALTERNATE if the USB-MIDI 1.0 alternate is enabled, otherwise
+ *         MIDI2_ALTERNATE.
+ */
+static uint8_t usbd_midi_default_alt(const struct usbd_midi_data *data)
+{
+	if (IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && data->midi1_enabled) {
+		return MIDI1_ALTERNATE;
+	}
+
+	return MIDI2_ALTERNATE;
+}
+
+/**
+ * @brief Resolve the descriptor pointer array index for the current runtime
+ *        enabled-alternate combination.
+ *
+ * @param data  Driver instance data holding the runtime enable flags.
+ *
+ * @return The enum usbd_midi_mode_index value to use with
+ *         usbd_midi_config.fs_descs / hs_descs.
+ */
+static enum usbd_midi_mode_index usbd_midi_mode_index(const struct usbd_midi_data *data)
+{
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	if (data->midi1_enabled && data->midi2_enabled) {
+		return USBD_MIDI_MODE_INDEX_BOTH;
+	}
+
+	if (data->midi1_enabled) {
+		return USBD_MIDI_MODE_INDEX_MIDI1_ONLY;
+	}
+
+	return USBD_MIDI_MODE_INDEX_MIDI2_ONLY;
+#elif IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+	ARG_UNUSED(data);
+	return USBD_MIDI_MODE_INDEX_MIDI1_ONLY;
+#else
+	ARG_UNUSED(data);
+	return USBD_MIDI_MODE_INDEX_MIDI2_ONLY;
+#endif
+}
+
+/**
+ * @brief Map a host-requested alternate setting number to an internal alternate.
+ *
+ * When both alternates are exposed the requested number is used directly. When
+ * only one alternate is exposed it is presented to the host as alternate
+ * setting 0, so a request for alternate 0 resolves to whichever single
+ * alternate is enabled.
+ *
+ * @param data       Driver instance data holding the runtime enable flags.
+ * @param alternate  Alternate setting number requested by the host.
+ * @param resolved   Set to the internal MIDI1_ALTERNATE / MIDI2_ALTERNATE value
+ *                   on success.
+ *
+ * @return true if @p alternate is valid for the current mode, false otherwise.
+ */
+static bool usbd_midi_resolve_alt(const struct usbd_midi_data *data, uint8_t alternate,
+				  uint8_t *resolved)
+{
+	if (IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) &&
+	    IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2) && data->midi1_enabled &&
+	    data->midi2_enabled) {
+		if (alternate == MIDI1_ALTERNATE || alternate == MIDI2_ALTERNATE) {
+			*resolved = alternate;
+			return true;
+		}
+		return false;
+	}
+
+	/* Only one alternate is exposed; the host must request alternate 0. */
+	if (alternate != MIDI1_ALTERNATE) {
+		return false;
+	}
+
+	if (IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && data->midi1_enabled) {
+		*resolved = MIDI1_ALTERNATE;
+		return true;
+	}
+
+	*resolved = MIDI2_ALTERNATE;
+	return true;
+}
+
+/**
+ * @brief Patch the USB-MIDI 2.0 interface descriptor's alternate setting number
+ *        to match the current runtime mode.
+ *
+ * When the USB-MIDI 2.0 alternate is the only one exposed it must be presented
+ * to the host as alternate setting 0; otherwise it keeps its native alternate
+ * setting 1.
+ *
+ * @param cfg   Driver instance configuration (may be NULL).
+ * @param data  Driver instance data holding the runtime enable flags.
+ */
+static void usbd_midi_update_alt_descriptor(const struct usbd_midi_config *cfg,
+					    const struct usbd_midi_data *data)
+{
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	if ((cfg == NULL) || (cfg->desc == NULL)) {
+		return;
+	}
+
+	if (data->midi2_enabled && !data->midi1_enabled) {
+		cfg->desc->if1_1_std.bAlternateSetting = MIDI1_ALTERNATE;
+	} else {
+		cfg->desc->if1_1_std.bAlternateSetting = MIDI2_ALTERNATE;
+	}
+#else
+	ARG_UNUSED(cfg);
+	ARG_UNUSED(data);
+#endif
+}
+
+/**
+ * @brief Select the descriptor pointer array for the current mode and speed.
+ *
+ * @param cfg    Driver instance configuration.
+ * @param data   Driver instance data holding the runtime enable flags.
+ * @param speed  USB bus speed the descriptors are requested for.
+ *
+ * @return The NULL-terminated descriptor pointer array to report to the host.
+ */
+static const struct usb_desc_header **
+usbd_midi_select_desc_array(const struct usbd_midi_config *cfg, const struct usbd_midi_data *data,
+			    const enum usbd_speed speed)
+{
+	enum usbd_midi_mode_index mode = usbd_midi_mode_index(data);
+
+	if (USBD_SUPPORTS_HIGH_SPEED && speed == USBD_SPEED_HS) {
+		return cfg->hs_descs[mode];
+	}
+
+	return cfg->fs_descs[mode];
+}
 
 static void usbd_midi_reset(struct usbd_midi_data *data)
 {
-	data->altsetting = MIDI1_ALTERNATE;
+	data->altsetting = usbd_midi_default_alt(data);
 	ring_buf_reset(&data->tx_queue);
 }
 
@@ -313,6 +491,7 @@ static void usbd_midi_notify_status(const struct device *dev, enum usbd_midi_sta
 	}
 }
 
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 /* Return the number of payload bytes carried by a MIDI 1.0 message with the
  * given status byte, and optionally its USB-MIDI 1.0 Code Index Number.
  *
@@ -587,6 +766,9 @@ static void usbd_midi1_recv(const struct device *dev, struct net_buf *const buf)
 	}
 }
 
+#endif /* CONFIG_USBD_MIDI2_ALTSETTING_MIDI1 */
+
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
 static void usbd_midi2_recv(const struct device *dev, struct net_buf *const buf)
 {
 	struct usbd_midi_data *data = dev->data;
@@ -612,6 +794,7 @@ static void usbd_midi2_recv(const struct device *dev, struct net_buf *const buf)
 		LOG_HEXDUMP_WRN(buf->data, buf->len, "Trailing data in Rx buffer");
 	}
 }
+#endif /* CONFIG_USBD_MIDI2_ALTSETTING_MIDI2 */
 
 static int usbd_midi_class_request(struct usbd_class_data *const class_data,
 				   struct net_buf *const buf, const int err)
@@ -628,11 +811,17 @@ static int usbd_midi_class_request(struct usbd_class_data *const class_data,
 		LOG_ERR("Transfer error %d", err);
 	}
 	if (USB_EP_DIR_IS_OUT(info->ep)) {
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
 		if (data->altsetting == MIDI1_ALTERNATE) {
 			usbd_midi1_recv(dev, buf);
 		} else {
 			usbd_midi2_recv(dev, buf);
 		}
+#elif IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+		usbd_midi1_recv(dev, buf);
+#else
+		usbd_midi2_recv(dev, buf);
+#endif
 		k_work_submit(&data->rx_work);
 	} else {
 		LOG_HEXDUMP_DBG(buf->data, buf->len, "Tx DATA complete");
@@ -650,23 +839,17 @@ static void usbd_midi_class_update(struct usbd_class_data *const class_data,
 	const struct device *dev = usbd_class_get_private(class_data);
 	bool ready = false;
 	struct usbd_midi_data *data = dev->data;
+	uint8_t resolved_alt;
 
 	LOG_DBG("update for %s: if=%u, alt=%u", dev->name, iface, alternate);
 
-	switch (alternate) {
-	case MIDI1_ALTERNATE:
-		data->altsetting = MIDI1_ALTERNATE;
-		ready = true;
-		LOG_INF("%s set USB-MIDI1.0 altsetting", dev->name);
-		break;
-	case MIDI2_ALTERNATE:
-		data->altsetting = MIDI2_ALTERNATE;
-		ready = true;
-		LOG_INF("%s set USB-MIDI2.0 altsetting", dev->name);
-		break;
-	default:
+	if (!usbd_midi_resolve_alt(data, alternate, &resolved_alt)) {
 		LOG_WRN("%s requested unsupported altsetting %u", dev->name, alternate);
-		break;
+	} else {
+		data->altsetting = resolved_alt;
+		ready = true;
+		LOG_INF("%s set USB-MIDI%s altsetting", dev->name,
+			resolved_alt == MIDI1_ALTERNATE ? "1.0" : "2.0");
 	}
 
 	if (ready) {
@@ -779,7 +962,21 @@ static int usbd_midi_class_init(struct usbd_class_data *const class_data)
 
 	LOG_DBG("Init %s device class", dev->name);
 
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	/* Both alternates share interface 1; reference whichever one is exposed
+	 * as alternate setting 0, since that is the descriptor the USB stack
+	 * assigned the MIDI Streaming interface number to.
+	 */
+	if (((struct usbd_midi_data *)dev->data)->midi1_enabled) {
+		desc->if0_cs.baInterfaceNr1 = desc->if1_0_std.bInterfaceNumber;
+	} else {
+		desc->if0_cs.baInterfaceNr1 = desc->if1_1_std.bInterfaceNumber;
+	}
+#elif IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 	desc->if0_cs.baInterfaceNr1 = desc->if1_0_std.bInterfaceNumber;
+#else
+	desc->if0_cs.baInterfaceNr1 = desc->if1_1_std.bInterfaceNumber;
+#endif
 	LOG_DBG("Set baInterfaceNr1 to %u", desc->if0_cs.baInterfaceNr1);
 
 	return 0;
@@ -790,14 +987,13 @@ static void *usbd_midi_class_get_desc(struct usbd_class_data *const class_data,
 {
 	const struct device *dev = usbd_class_get_private(class_data);
 	const struct usbd_midi_config *config = dev->config;
+	const struct usbd_midi_data *data = dev->data;
 
 	LOG_DBG("Get descriptors for %s", dev->name);
 
-	if (USBD_SUPPORTS_HIGH_SPEED && speed == USBD_SPEED_HS) {
-		return (void *)config->hs_descs;
-	}
+	usbd_midi_update_alt_descriptor(config, data);
 
-	return (void *)config->fs_descs;
+	return (void *)usbd_midi_select_desc_array(config, data, speed);
 }
 
 static struct usbd_class_api usbd_midi_class_api = {
@@ -833,13 +1029,30 @@ static uint8_t usbd_midi_get_bulk_in(struct usbd_class_data *const class_data)
 	struct usbd_context *uds_ctx = usbd_class_get_ctx(class_data);
 	const struct device *dev = usbd_class_get_private(class_data);
 	const struct usbd_midi_config *cfg = dev->config;
+	const struct usb_ep_descriptor *in_ep_fs;
+	const struct usb_ep_descriptor *in_ep_hs;
 
-	if (USBD_SUPPORTS_HIGH_SPEED &&
-	    usbd_bus_speed(uds_ctx) == USBD_SPEED_HS) {
-		return cfg->desc->if1_1_in_ep_hs.bEndpointAddress;
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	if (((const struct usbd_midi_data *)dev->data)->altsetting == MIDI1_ALTERNATE) {
+		in_ep_fs = &cfg->desc->if1_0_in_ep_fs;
+		in_ep_hs = &cfg->desc->if1_0_in_ep_hs;
+	} else {
+		in_ep_fs = &cfg->desc->if1_1_in_ep_fs;
+		in_ep_hs = &cfg->desc->if1_1_in_ep_hs;
+	}
+#elif IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+	in_ep_fs = &cfg->desc->if1_0_in_ep_fs;
+	in_ep_hs = &cfg->desc->if1_0_in_ep_hs;
+#else
+	in_ep_fs = &cfg->desc->if1_1_in_ep_fs;
+	in_ep_hs = &cfg->desc->if1_1_in_ep_hs;
+#endif
+
+	if (USBD_SUPPORTS_HIGH_SPEED && usbd_bus_speed(uds_ctx) == USBD_SPEED_HS) {
+		return in_ep_hs->bEndpointAddress;
 	}
 
-	return cfg->desc->if1_1_in_ep_fs.bEndpointAddress;
+	return in_ep_fs->bEndpointAddress;
 }
 
 static uint8_t usbd_midi_get_bulk_out(struct usbd_class_data *const class_data)
@@ -847,13 +1060,30 @@ static uint8_t usbd_midi_get_bulk_out(struct usbd_class_data *const class_data)
 	struct usbd_context *uds_ctx = usbd_class_get_ctx(class_data);
 	const struct device *dev = usbd_class_get_private(class_data);
 	const struct usbd_midi_config *cfg = dev->config;
+	const struct usb_ep_descriptor *out_ep_fs;
+	const struct usb_ep_descriptor *out_ep_hs;
 
-	if (USBD_SUPPORTS_HIGH_SPEED &&
-	    usbd_bus_speed(uds_ctx) == USBD_SPEED_HS) {
-		return cfg->desc->if1_1_out_ep_hs.bEndpointAddress;
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1) && IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)
+	if (((const struct usbd_midi_data *)dev->data)->altsetting == MIDI1_ALTERNATE) {
+		out_ep_fs = &cfg->desc->if1_0_out_ep_fs;
+		out_ep_hs = &cfg->desc->if1_0_out_ep_hs;
+	} else {
+		out_ep_fs = &cfg->desc->if1_1_out_ep_fs;
+		out_ep_hs = &cfg->desc->if1_1_out_ep_hs;
+	}
+#elif IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+	out_ep_fs = &cfg->desc->if1_0_out_ep_fs;
+	out_ep_hs = &cfg->desc->if1_0_out_ep_hs;
+#else
+	out_ep_fs = &cfg->desc->if1_1_out_ep_fs;
+	out_ep_hs = &cfg->desc->if1_1_out_ep_hs;
+#endif
+
+	if (USBD_SUPPORTS_HIGH_SPEED && usbd_bus_speed(uds_ctx) == USBD_SPEED_HS) {
+		return out_ep_hs->bEndpointAddress;
 	}
 
-	return cfg->desc->if1_1_out_ep_fs.bEndpointAddress;
+	return out_ep_fs->bEndpointAddress;
 }
 
 static void usbd_midi_rx_work(struct k_work *work)
@@ -910,6 +1140,7 @@ static int usbd_midi_preinit(const struct device *dev)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 static uint8_t midi1_sysex_cin_from_len(const uint8_t chunk_len)
 {
 	if (chunk_len == 1) {
@@ -1034,23 +1265,28 @@ static int midi1_in_ep_cable_for_group(const struct usbd_midi_config *config,
 
 	return -ENOTSUP;
 }
+#endif /* CONFIG_USBD_MIDI2_ALTSETTING_MIDI1 */
 
 int usbd_midi_send(const struct device *dev, const struct midi_ump ump)
 {
-	const struct usbd_midi_config *config = dev->config;
 	struct usbd_midi_data *data = dev->data;
 	size_t words = UMP_NUM_WORDS(ump);
 	size_t needed;
 	uint32_t word;
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
+	const struct usbd_midi_config *config = dev->config;
 	uint32_t events[3];
 	uint8_t cable_number = 0;
 	int n_events = 0;
 	int ret;
+#endif
 
 	LOG_DBG("Send MT=%X group=%X", UMP_MT(ump), UMP_GROUP(ump));
 
-	if (data->altsetting == MIDI2_ALTERNATE) {
+	if (IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2) &&
+	    data->altsetting == MIDI2_ALTERNATE) {
 		needed = 4 * words;
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 	} else if (data->altsetting == MIDI1_ALTERNATE) {
 		ret = midi1_in_ep_cable_for_group(config, UMP_GROUP(ump), &cable_number);
 		if (ret) {
@@ -1072,6 +1308,7 @@ int usbd_midi_send(const struct device *dev, const struct midi_ump ump)
 			word = sys_cpu_to_le32(word);
 			needed = MIDI1_EVENT_BYTES;
 		}
+#endif
 	} else {
 		return -EIO;
 	}
@@ -1081,11 +1318,13 @@ int usbd_midi_send(const struct device *dev, const struct midi_ump ump)
 		return -ENOBUFS;
 	}
 
-	if (data->altsetting == MIDI2_ALTERNATE) {
+	if (IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2) &&
+	    data->altsetting == MIDI2_ALTERNATE) {
 		for (size_t i = 0; i < words; i++) {
 			word = sys_cpu_to_le32(ump.data[i]);
 			ring_buf_put(&data->tx_queue, (const uint8_t *)&word, sizeof(word));
 		}
+#if IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)
 	} else if (UMP_MT(ump) == UMP_MT_DATA_64) {
 		for (int e = 0; e < n_events; e++) {
 			ring_buf_put(&data->tx_queue, (const uint8_t *)&events[e],
@@ -1093,6 +1332,7 @@ int usbd_midi_send(const struct device *dev, const struct midi_ump ump)
 		}
 	} else {
 		ring_buf_put(&data->tx_queue, (const uint8_t *)&word, MIDI1_EVENT_BYTES);
+#endif
 	}
 	k_work_submit(&data->tx_work);
 
@@ -1117,6 +1357,41 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 	const struct usbd_midi_data *data = dev->data;
 
 	return data->status;
+}
+
+int usbd_midi_set_mode(const struct device *dev, bool enable_midi1, bool enable_midi2)
+{
+	struct usbd_midi_data *data = dev->data;
+	const struct usbd_midi_config *cfg = dev->config;
+	struct usbd_context *uds_ctx = NULL;
+
+	if (enable_midi1 && !IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1)) {
+		return -ENOTSUP;
+	}
+
+	if (enable_midi2 && !IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)) {
+		return -ENOTSUP;
+	}
+
+	if (!enable_midi1 && !enable_midi2) {
+		return -EINVAL;
+	}
+
+	if (data->class_data != NULL) {
+		uds_ctx = usbd_class_get_ctx(data->class_data);
+	}
+
+	if ((uds_ctx != NULL) && uds_ctx->status.enabled) {
+		return -EBUSY;
+	}
+
+	data->midi1_enabled = enable_midi1;
+	data->midi2_enabled = enable_midi2;
+
+	usbd_midi_reset(data);
+	usbd_midi_update_alt_descriptor(cfg, data);
+
+	return 0;
 }
 
 /* Group Terminal Block unique identification number, type and protocol
@@ -1346,6 +1621,7 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 				.bInCollection = 1,                                                \
 				.baInterfaceNr1 = 1,                                               \
 			},                                                                         \
+		IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1, (                                   \
 		.if1_0_std =                                                                       \
 			{                                                                          \
 				.bLength = sizeof(struct usb_if_descriptor),                       \
@@ -1422,6 +1698,8 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 				.baAssocJackID = {DT_INST_FOREACH_CHILD(                           \
 					n, USBD_MIDI1_EMB_OUT_JACK_ID_IF_SOURCE) 0},               \
 			},                                                                         \
+		))                                                                                 \
+		IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2, (                                   \
 		.if1_1_std =                                                                       \
 			{                                                                          \
 				.bLength = sizeof(struct usb_if_descriptor),                       \
@@ -1489,6 +1767,7 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 				.bNumGrpTrmBlock = N_INPUTS(n),                                    \
 				.baAssoGrpTrmBlkID = {GRPTRM_INPUT_BLOCK_IDS(n) 0},                \
 			},                                                                         \
+		))                                                                                 \
 		.grptrm_header =                                                                   \
 			{                                                                          \
 				.bLength = sizeof(struct usb_midi_grptrm_header_descriptor),       \
@@ -1498,46 +1777,108 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 			},                                                                         \
 		.grptrm_blocks = {DT_INST_FOREACH_CHILD(n, USBD_MIDI2_BUILD_GRPTRM_BLOCK)},        \
 	};                                                                                         \
-	static const struct usb_desc_header						\
-		*usbd_midi_desc_array_fs_##n[] = {					\
-		(struct usb_desc_header *)&usbd_midi_desc_##n.iad,                                 \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std,                             \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs,                              \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std,                           \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header,                     \
-		USBD_MIDI1_JACK_PTRS(n)                                                            \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_fs,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_fs,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std,                           \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_fs,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_fs,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep,                      \
-		NULL,                                                                              \
-	};                                                                                         \
-	static const struct usb_desc_header						\
-		*usbd_midi_desc_array_hs_##n[] = {					\
-		(struct usb_desc_header *)&usbd_midi_desc_##n.iad,                                 \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std,                             \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs,                              \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std,                           \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header,                     \
-		USBD_MIDI1_JACK_PTRS(n)                                                            \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_hs,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_hs,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std,                           \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_hs,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep,                     \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_hs,                      \
-		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep,                      \
-		NULL,                                                                              \
-	};
+	IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1, ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_fs_midi1_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header, \
+		USBD_MIDI1_JACK_PTRS(n) \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep, \
+		NULL, \
+	}; \
+	)) \
+	IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2, ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_fs_midi2_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep, \
+		NULL, \
+	}; \
+	)) \
+	IF_ENABLED(UTIL_AND(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1), \
+			    IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)), ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_fs_both_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header, \
+		USBD_MIDI1_JACK_PTRS(n) \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_fs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep, \
+		NULL, \
+	}; \
+	)) \
+	IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1, ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_hs_midi1_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header, \
+		USBD_MIDI1_JACK_PTRS(n) \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep, \
+		NULL, \
+	}; \
+	)) \
+	IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2, ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_hs_midi2_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep, \
+		NULL, \
+	}; \
+	)) \
+	IF_ENABLED(UTIL_AND(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1), \
+			    IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)), ( \
+	static const struct usb_desc_header *usbd_midi_desc_array_hs_both_##n[] = { \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.iad, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if0_cs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_ms_header, \
+		USBD_MIDI1_JACK_PTRS(n) \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_out_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_in_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_0_cs_in_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_std, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_ms_header, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_out_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_out_ep, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_in_ep_hs, \
+		(struct usb_desc_header *)&usbd_midi_desc_##n.if1_1_cs_in_ep, \
+		NULL, \
+	}; \
+	))
 /* clang-format on */
 
 /* clang-format off */
@@ -1561,8 +1902,30 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 			  NULL);                                                                   \
 	static const struct usbd_midi_config usbd_midi_config_##n = {                              \
 		.desc = &usbd_midi_desc_##n,                                                       \
-		.fs_descs = usbd_midi_desc_array_fs_##n,                                           \
-		.hs_descs = usbd_midi_desc_array_hs_##n,                                           \
+		.fs_descs = {                                                                      \
+			IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1,                             \
+				([USBD_MIDI_MODE_INDEX_MIDI1_ONLY] =                              \
+					 usbd_midi_desc_array_fs_midi1_##n,))                      \
+			IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2,                             \
+				([USBD_MIDI_MODE_INDEX_MIDI2_ONLY] =                              \
+					 usbd_midi_desc_array_fs_midi2_##n,))                      \
+			IF_ENABLED(UTIL_AND(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1),        \
+					    IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)),       \
+				([USBD_MIDI_MODE_INDEX_BOTH] =                                    \
+					 usbd_midi_desc_array_fs_both_##n,))                       \
+		},                                                                                 \
+		.hs_descs = {                                                                      \
+			IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1,                             \
+				([USBD_MIDI_MODE_INDEX_MIDI1_ONLY] =                              \
+					 usbd_midi_desc_array_hs_midi1_##n,))                      \
+			IF_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2,                             \
+				([USBD_MIDI_MODE_INDEX_MIDI2_ONLY] =                              \
+					 usbd_midi_desc_array_hs_midi2_##n,))                      \
+			IF_ENABLED(UTIL_AND(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1),        \
+					    IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2)),       \
+				([USBD_MIDI_MODE_INDEX_BOTH] =                                    \
+					 usbd_midi_desc_array_hs_both_##n,))                       \
+		},                                                                                 \
 		.cn_to_group_out = usbd_midi_cn_to_group_out_##n,                                  \
 		.cn_to_group_out_len = N_OUTPUTS(n),                                               \
 		.cn_to_group_in = usbd_midi_cn_to_group_in_##n,                                    \
@@ -1570,7 +1933,10 @@ enum usbd_midi_status usbd_midi_get_status(const struct device *dev)
 	};                                                                                         \
 	static struct usbd_midi_data usbd_midi_data_##n = {                                        \
 		.class_data = &midi_##n,                                                           \
-		.altsetting = MIDI1_ALTERNATE,                                                     \
+		.altsetting = COND_CODE_1(IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1),          \
+					  (MIDI1_ALTERNATE), (MIDI2_ALTERNATE)),                  \
+		.midi1_enabled = IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI1),                   \
+		.midi2_enabled = IS_ENABLED(CONFIG_USBD_MIDI2_ALTSETTING_MIDI2),                   \
 	};                                                                                         \
 	DEVICE_DT_INST_DEFINE(n, usbd_midi_preinit, NULL, &usbd_midi_data_##n,                     \
 			      &usbd_midi_config_##n, POST_KERNEL,                                  \

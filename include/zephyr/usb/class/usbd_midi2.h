@@ -28,12 +28,19 @@ extern "C" {
 /**
  * @brief USB-MIDI interface status
  *
- * The class driver always exposes both the legacy USB-MIDI 1.0 alternate and
- * the USB-MIDI 2.0 alternate during enumeration. Hosts that do not understand
- * MIDI 2.0 stay on the MIDI 1.0 alternate; MIDI 2.0 aware hosts switch to the
- * MIDI 2.0 alternate. The driver translates between USB-MIDI 1.0 event packets
- * and Universal MIDI Packets transparently, so applications always exchange
- * UMPs through @ref usbd_midi_send and @ref usbd_midi_ops.rx_packet_cb.
+ * By default the class driver exposes both the legacy USB-MIDI 1.0 alternate
+ * and the USB-MIDI 2.0 alternate during enumeration. Hosts that do not
+ * understand MIDI 2.0 stay on the MIDI 1.0 alternate; MIDI 2.0 aware hosts
+ * switch to the MIDI 2.0 alternate. The driver translates between USB-MIDI 1.0
+ * event packets and Universal MIDI Packets transparently, so applications
+ * always exchange UMPs through @ref usbd_midi_send and
+ * @ref usbd_midi_ops.rx_packet_cb.
+ *
+ * Which alternates are exposed can be restricted at compile time via
+ * :kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI1` and
+ * :kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI2`, and at run time via
+ * @ref usbd_midi_set_mode. When only a single alternate is exposed it is always
+ * presented to the host as alternate setting 0.
  *
  * Applications can observe the interface status through
  * @ref usbd_midi_ops.status_changed_cb to know whether the interface is
@@ -118,6 +125,31 @@ void usbd_midi_set_ops(const struct device *dev, const struct usbd_midi_ops *ops
  *             interface is available and which alternate the host has selected
  */
 enum usbd_midi_status usbd_midi_get_status(const struct device *dev);
+
+/**
+ * @brief Configure which USB-MIDI alternate settings are exposed to the host
+ *
+ * Allows an application to expose only the USB-MIDI 1.0 alternate, only the
+ * USB-MIDI 2.0 alternate, or both, at run time. When only a single alternate is
+ * exposed it is presented to the host as alternate setting 0. An alternate can
+ * only be enabled if it was also built in (see
+ * :kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI1` and
+ * :kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI2`).
+ *
+ * This API changes the reported descriptors, so it must be called while the USB
+ * device stack is disabled (typically before the first @c usbd_enable), so the
+ * host enumerates the chosen configuration.
+ *
+ * @param[in]  dev           The MIDI2 device
+ * @param[in]  enable_midi1  True to expose the USB-MIDI 1.0 alternate setting
+ * @param[in]  enable_midi2  True to expose the USB-MIDI 2.0 alternate setting
+ *
+ * @return 0 on success
+ * @retval -ENOTSUP if an alternate is requested that was not built in
+ * @retval -EINVAL if both alternates are disabled
+ * @retval -EBUSY if the USB device is currently enabled
+ */
+int usbd_midi_set_mode(const struct device *dev, bool enable_midi1, bool enable_midi2);
 
 /**
  * @}

@@ -37,8 +37,15 @@ Key features:
 Configuration
 *************
 
-Enable the class with :kconfig:option:`CONFIG_USBD_MIDI2_CLASS`. The driver
-always builds both the USB-MIDI 1.0 and USB-MIDI 2.0 alternate settings.
+Enable the class with :kconfig:option:`CONFIG_USBD_MIDI2_CLASS`. By default the
+driver builds both the USB-MIDI 1.0 and USB-MIDI 2.0 alternate settings. Either
+alternate can be dropped at build time to save flash and RAM with
+:kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI1` and
+:kconfig:option:`CONFIG_USBD_MIDI2_ALTSETTING_MIDI2`; at least one of them must
+remain enabled. The set of alternates that are actually exposed to the host can
+additionally be restricted at run time with :c:func:`usbd_midi_set_mode`. When
+only a single alternate is exposed it is presented to the host as alternate
+setting 0.
 
 The Devicetree node describes the group terminal blocks the interface reports
 to the host. Each block currently corresponds to exactly one MIDI 2.0 group and
@@ -83,6 +90,13 @@ Transmit:
 
 * :c:func:`usbd_midi_send` queues a UMP. The driver routes it to the active
   alternate, converting to USB-MIDI 1.0 event packets when needed.
+
+Alternate selection:
+
+* :c:func:`usbd_midi_set_mode` chooses which USB-MIDI alternates are exposed to
+  the host (MIDI 1.0 only, MIDI 2.0 only, or both). Because it changes the
+  reported descriptors, it must be called while the USB device stack is disabled,
+  typically before the first :c:func:`usbd_enable`.
 
 Example
 *******
